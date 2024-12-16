@@ -10,8 +10,10 @@ import (
 
 func init() {
 	solver.RegisterHint(DecodeFloatHint)
+	solver.RegisterHint(DecodePositHint)
 	solver.RegisterHint(NthBitHint)
 	solver.RegisterHint(PowerOfTwoHint)
+	solver.RegisterHint(EFBitsHint)
 	solver.RegisterHint(DecomposeMantissaForRoundingHint)
 	solver.RegisterHint(NormalizeHint)
 	solver.RegisterHint(AbsHint)
@@ -117,6 +119,65 @@ func DecodeFloatHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) erro
 	return nil
 }
 
+func DecodePositHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	v := inputs[0].Uint64()
+	N := inputs[1].Uint64()
+	ES := inputs[2].Uint64()
+
+	if v == (1 << N) - v {
+		// Handle 0, inf
+		if v == 0 {
+			outputs[0].SetUint64(0)
+		} else {
+			outputs[0].SetUint64(1)
+		}
+		outputs[1].SetUint64(0)
+		outputs[2].SetUint64(0)
+		outputs[3].SetUint64(0)
+		return nil
+	}
+
+	s := v >> (N - 1)
+	if s == 1 {
+		v = (1 << N) - v
+	}
+	var rl int
+	var k uint64
+	r := (v >> (N - 2)) & 1
+	rl = 1
+	for i := int(N - 3); i >= 0; i-- {
+		if ((v >> i) & 1) != r { break }
+		rl++
+	}
+	if r == 0 {
+		k = N - 1 - uint64(rl)
+	} else {
+		k = N - 1 + uint64(rl) - 1
+	}
+	var e, f uint64
+	var ef_bits uint64
+	ef_bits = 0
+	if uint64(rl) + 1 <= N - 1 {
+		ef_bits = N - 1 - uint64(rl) - 1
+	}
+	regime := v >> ef_bits
+	ef := v - (regime << ef_bits)
+	if ef_bits >= ES {
+		e = ef >> (ef_bits - ES)
+		f = ef - (e << (ef_bits - ES))
+	} else {
+		e = ef
+		f = 0
+	}
+
+
+	outputs[0].SetUint64(s)
+	outputs[1].SetUint64(k)
+	outputs[2].SetUint64(e)
+	outputs[3].SetUint64(f)
+	return nil
+}
+
 func NthBitHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	v := new(big.Int).Set(inputs[0])
 	n := int(inputs[1].Uint64())
@@ -127,6 +188,28 @@ func NthBitHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 
 func PowerOfTwoHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
 	outputs[0].Lsh(big.NewInt(1), uint(inputs[0].Uint64()))
+	return nil
+}
+
+func EFBitsHint(field *big.Int, inputs []*big.Int, outputs []*big.Int) error {
+	i := inputs[0].Uint64()
+	N := inputs[1].Uint64()
+	ES := inputs[2].Uint64()
+	efbits := i - 1
+	if i > N-2 {
+		efbits = 2*N - 4 - i
+	}
+	if i == 0 || i == 2*N-3 {
+		efbits = 0
+	}
+	ebits := ES
+	if ebits > efbits {
+		ebits = efbits
+	}
+	outputs[0].SetUint64(ebits)
+	outputs[1].SetUint64(efbits - ebits)
+	outputs[2].Lsh(big.NewInt(1), uint(ebits))
+	outputs[3].Lsh(big.NewInt(1), uint(efbits - ebits))
 	return nil
 }
 

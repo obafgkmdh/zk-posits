@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/bits"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -328,6 +329,50 @@ func ComponentsOf(v uint64, E, M uint64) []*big.Int {
 	}
 
 	return []*big.Int{sign, exponent, mantissa, is_abnormal}
+}
+
+func PositComponentsOf(v, N, ES uint64) []*big.Int {
+	if v == -v {
+		// Handle 0, inf
+		if v == 0 {
+			return []*big.Int{big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0)}
+		} else {
+			return []*big.Int{big.NewInt(1), big.NewInt(0), big.NewInt(0), big.NewInt(0)}
+		}
+	}
+
+	s := v >> (N - 1)
+	if s == 1 {
+		v = -v
+	}
+	var rl int
+	var k uint64
+	r := (v >> (N - 2)) & 1
+	if r == 0 {
+		rl = bits.LeadingZeros64(v) - 1
+		k = N - 2 - uint64(rl)
+	} else {
+		rl = bits.LeadingZeros64(^(v | (1 << (N - 1)))) - 1
+		k = N - 2 + uint64(rl) - 1
+	}
+	var e, f uint64
+	ef_bits := N - 1 - uint64(rl) - 1
+	regime := v >> ef_bits
+	ef := v - (regime << (N - 1 - uint64(rl) - 1))
+	f = 1 << (N - 3 - ES)
+	if ef_bits >= ES {
+		e = ef >> (ef_bits - ES)
+		f += (ef - (e << (ef_bits - ES))) << (N - 3 - ef_bits)
+	} else {
+		e = ef << (ES - ef_bits)
+	}
+
+	return []*big.Int{
+		new(big.Int).SetUint64(s),
+		new(big.Int).SetUint64(k),
+		new(big.Int).SetUint64(e),
+		new(big.Int).SetUint64(f),
+	}
 }
 
 func ValueOf(components []*big.Int, E, M uint64) uint64 {
