@@ -36,10 +36,7 @@ func NewContext(api frontend.API, range_size uint, N uint, ES uint) Context {
 	MAX_E := new(big.Int).Lsh(big.NewInt(1), ES)
 	M := N - 3 - ES
 	LOGN := uint(bits.Len(N))
-	pow2_size := 2*N - 3
-	if pow2_size <= 64 {
-		pow2_size = 65
-	}
+	pow2_size := N
 	return Context{
 		Api:          api,
 		Gadget:       gadget.NewWithEFBits(api, range_size, pow2_size, N, ES),
@@ -118,7 +115,7 @@ func (f *Context) NewPosit(v frontend.Variable) PositVar {
 
 // Allocate a constant in the constraint system.
 func (f *Context) NewConstant(v uint64) PositVar {
-	components := util.ComponentsOf(v, uint64(f.N), uint64(f.ES))
+	components := util.PositComponentsOf(v, uint64(f.N), uint64(f.ES))
 
 	return PositVar{
 		Sign:       components[0],
@@ -148,6 +145,7 @@ func (f *Context) round(
 	mantissa_bit_length uint,
 	exponent frontend.Variable,
 ) (frontend.Variable, frontend.Variable, frontend.Variable) {
+	f.Api.Compiler().MarkBoolean(zero_mantissa)
 	mantissa_low := new(big.Int).Lsh(big.NewInt(1), mantissa_bit_length - 1)
 
 	// decompose exponent = regime * 2^ES + e, where e is in [0, MAX_E)
@@ -158,17 +156,17 @@ func (f *Context) round(
 	regime := outputs[0]
 	e := f.Api.Sub(exponent, f.Api.Mul(regime, f.MAX_E))
 	f.Gadget.AssertBitLength(e, f.ES, gadget.TightForSmallAbs)
-	
+
 	ebits, fbits, eshift, fshift := f.efbits(regime)
 	efshift := f.Api.Mul(eshift, fshift)
 
 	// Depending on the regime, either the exponent or mantissa needs to be rounded.
-	// To avoid rounding twice, we do rounding on exponent || mantissa, where mantissa has its MSB removed
+	// To avoid rounding twice, we do rounding on regime || exponent || mantissa, where mantissa has its MSB removed
 	combined_e_m := f.Api.Select(
 		zero_mantissa,
 		0,
-		f.Api.Add(f.Api.Mul(e, mantissa_low), mantissa))
-	// This number has ES + mantissa_bit_length - 1 bits, and we want to round to efbits bits.
+		f.Api.Add(f.Api.Mul(exponent, mantissa_low), mantissa))
+	// This number has LOGN + ES + mantissa_bit_length - 1 bits, and we want to round to LOGN + efbits bits.
 	// So, we shift left by efbits and then round based on the last ES + mantissa_bit_length - 1 bits
 	// decompose combined_e_m = p || q || r || s
 	q_idx := f.ES + mantissa_bit_length - 1
@@ -183,7 +181,7 @@ func (f *Context) round(
 	r := outputs[2]
 	s := outputs[3]
 	// Make sure q, r are boolean and p, s are small
-	f.Gadget.AssertBitLength(p, f.N - 3, gadget.Loose)
+	f.Gadget.AssertBitLength(p, f.N - 3 + f.LOGN, gadget.Loose)
 	f.Api.AssertIsBoolean(q)
 	f.Api.AssertIsBoolean(r)
 	f.Gadget.AssertBitLength(s, q_idx - 1, gadget.TightForSmallAbs)
@@ -203,14 +201,20 @@ func (f *Context) round(
 	if err != nil {
 		panic(err)
 	}
-	e = outputs[0]
-	mantissa = f.Api.Sub(rounded, f.Api.Mul(e, new(big.Int).Lsh(big.NewInt(1), f.M)))
-	// Make sure e and mantissa are small
-	f.Gadget.AssertBitLength(e, f.ES, gadget.Loose)
+	re := outputs[0]
+	mantissa = f.Api.Sub(rounded, f.Api.Mul(re, new(big.Int).Lsh(big.NewInt(1), f.M)))
+	outputs, err = f.Api.Compiler().NewHint(hint.TruncHint, 1, re, f.ES)
+	if err != nil {
+		panic(err)
+	}
+	regime = outputs[0]
+	e = f.Api.Sub(re, f.Api.Mul(regime, f.MAX_E))
+	// Make sure regime, e, and mantissa are small
+	f.Gadget.AssertBitLength(regime, f.LOGN, gadget.Loose)
+	f.Gadget.AssertBitLength(e, f.ES, gadget.TightForSmallAbs)
 	f.Gadget.AssertBitLength(mantissa, f.M, gadget.TightForSmallAbs)
 
-	exponent_overflow := f.Gadget.IsEq(e, f.MAX_E)
-	return f.Api.Select(zero_mantissa, 0, f.Api.Add(new(big.Int).Lsh(big.NewInt(1), f.M), mantissa)), f.Api.Add(regime, exponent_overflow), f.Api.Sub(e, f.Api.Mul(exponent_overflow, f.MAX_E))
+	return f.Api.Add(f.Api.Select(zero_mantissa, 0, new(big.Int).Lsh(big.NewInt(1), f.M)), mantissa), regime, e
 }
 
 // Add two numbers.
@@ -349,18 +353,18 @@ func (f *Context) Add(x, y PositVar) PositVar {
 	// Re-bias the regime by adding (N-1) * 2^ES
 	exponent = f.Api.Add(exponent, (f.N-1) << f.ES)
 
-	mantissa_shifted, regime, e := f.round(mantissa_no_msb, mantissa_is_zero, mantissa_bit_length, exponent)
-
 	is_infinity := f.Api.Or(
 		f.Api.And(f.Api.IsZero(x.Regime), x.Sign),
 		f.Api.And(f.Api.IsZero(y.Regime), y.Sign),
 	)
 
+	mantissa_shifted, regime, e := f.round(mantissa_no_msb, f.Api.Or(is_infinity, mantissa_is_zero), mantissa_bit_length, exponent)
+
 	return PositVar{
 		Sign:     f.Api.Select(is_infinity, 1, mantissa_lt_0),
-		Regime:   f.Api.Select(f.Api.Or(is_infinity, mantissa_is_zero), 0, regime),
-		Exponent: f.Api.Select(is_infinity, 0, e),
-		Mantissa: f.Api.Select(is_infinity, 0, mantissa_shifted),
+		Regime:   regime,
+		Exponent: e,
+		Mantissa: mantissa_shifted,
 	}
 }
 
@@ -460,7 +464,7 @@ func (f *Context) Mul(x, y PositVar) PositVar {
 
 	return PositVar{
 		Sign:     sign,
-		Regime:   f.Api.Select(zero_mantissa, 0, regime),
+		Regime:   regime,
 		Exponent: e,
 		Mantissa: mantissa,
 	}
