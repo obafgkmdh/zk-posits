@@ -473,26 +473,19 @@ func (f *Context) Mul(x, y PositVar) PositVar {
 func (f *Context) less(x, y PositVar, allow_eq uint) frontend.Variable {
 	m := new(big.Int).Lsh(big.NewInt(1), f.M)
 	xv := f.Api.Add(f.Api.Mul(f.Api.Add(f.Api.Mul(x.Regime, f.MAX_E), x.Exponent), m), x.Mantissa)
-	yv := f.Api.Add(f.Api.Mul(f.Api.Add(f.Api.Mul(x.Regime, f.MAX_E), x.Exponent), m), y.Mantissa)
+	yv := f.Api.Add(f.Api.Mul(f.Api.Add(f.Api.Mul(y.Regime, f.MAX_E), y.Exponent), m), y.Mantissa)
 	xv_lt_yv := f.Api.Sub(1, f.Gadget.IsPositive(f.Api.Sub(xv, yv), f.LOGN + f.ES + f.M))
 	f.Api.Compiler().MarkBoolean(xv_lt_yv)
 
-	x_pos := f.Api.Sub(1, x.Sign)
-	f.Api.Compiler().MarkBoolean(x_pos)
-	b := f.Api.Or(
-		f.Api.And(x_pos, y.Sign), // x positive, y negative
-		f.Api.Xor(
-			x.Sign,
-			f.Api.Or(
-				xv_lt_yv, // x < y
-				f.Api.And(
-					f.Gadget.IsEq(xv, yv),
-						f.Api.Xor(
-							1 - allow_eq,
-							x.Sign,
-						),
-					))),
-	)
+	c := f.Api.Or(
+		xv_lt_yv, // x < y
+		f.Api.And(
+			allow_eq,
+			f.Gadget.IsEq(xv, yv),
+		))
+	not_c := f.Api.Sub(1, c)
+	f.Api.Compiler().MarkBoolean(not_c)
+	b := f.Api.Lookup2(x.Sign, y.Sign, c, 1, 0, not_c)
 	f.Api.Compiler().MarkBoolean(b)
 	return b
 }
